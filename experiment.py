@@ -23,7 +23,7 @@ LN2 = math.log(2.)
 
 
 # data instance object
-Instance = namedtuple('Instance', 'p t fv h a lang right wrong ts uid lexeme'.split())
+Instance = namedtuple('Instance', 'p t fv h uid wid'.split())
 
 
 class SpacedRepetitionModel(object):
@@ -150,26 +150,17 @@ class SpacedRepetitionModel(object):
             mae_p, cor_p, mae_h, cor_h))
 
     def dump_weights(self, fname):
-        with open(fname, 'wb') as f:
-            for (k, v) in self.weights.iteritems():
+        with open(fname, 'w') as f:
+            for (k, v) in self.weights.items():
                 f.write('%s\t%.4f\n' % (k, v))
 
     def dump_predictions(self, fname, testset):
-        with open(fname, 'wb') as f:
-            f.write('p\tpp\th\thh\tlang\tuser_id\ttimestamp\n')
+        with open(fname, 'w') as f:
+            f.write('word\tp\tpp\th\thh\tuser_id\t\n')
             for inst in testset:
                 pp, hh = self.predict(inst)
-                f.write('%.4f\t%.4f\t%.4f\t%.4f\t%s\t%s\t%d\n' % (inst.p, pp, inst.h, hh, inst.lang, inst.uid, inst.ts))
+                f.write('%d\t%.4f\t%.4f\t%.4f\t%.4f\t%s\n' % (inst.wid, inst.p, pp, inst.h, hh, inst.uid))
 
-    def dump_detailed_predictions(self, fname, testset):
-        with open(fname, 'wb') as f:
-            f.write('p\tpp\th\thh\tlang\tuser_id\ttimestamp\tlexeme_tag\n')
-            for inst in testset:
-                pp, hh = self.predict(inst)
-                for i in range(inst.right):
-                    f.write('1.0\t%.4f\t%.4f\t%.4f\t%s\t%s\t%d\t%s\n' % (pp, inst.h, hh, inst.lang, inst.uid, inst.ts, inst.lexeme))
-                for i in range(inst.wrong):
-                    f.write('0.0\t%.4f\t%.4f\t%.4f\t%s\t%s\t%d\t%s\n' % (pp, inst.h, hh, inst.lang, inst.uid, inst.ts, inst.lexeme))
 
 
 def pclip(p):
@@ -211,46 +202,48 @@ def read_data(input_file, method, omit_bias=False, omit_lexemes=False, max_lines
     sys.stderr.write('reading data...')
     instances = list()
     if input_file.endswith('gz'):
-        f = gzip.open(input_file, 'rb')
+        f = gzip.open(input_file, 'r')
     else:
-        f = open(input_file, 'rb')
+        f = open(input_file, 'r')
     reader = csv.DictReader(f)
     for i, row in enumerate(reader):
         if max_lines is not None and i >= max_lines:
             break
-        p = pclip(float(row['p_recall']))
-        t = float(row['delta'])/(60*60*24)  # convert time delta to days
+        p = pclip(float(row['word_score']))
+        t = float(row['elapsed_time'])/(60*60*24)  # convert time delta to days
         h = hclip(-t/(math.log(p, 2)))
-        lang = '%s->%s' % (row['ui_language'], row['learning_language'])
-        lexeme_id = row['lexeme_id']
-        lexeme_string = row['lexeme_string']
-        timestamp = int(row['timestamp'])
+        word_id = int(row['word_id'])
         user_id = row['user_id']
-        seen = int(row['history_seen'])
-        right = int(row['history_correct'])
-        wrong = seen - right
-        right_this = int(row['session_correct'])
-        wrong_this = int(row['session_seen']) - right_this
+        l_word = int(row['word_length'])
+        l_tone_sequence = int(row['tone_sequence_length'])
+        complexity = (0.8 * l_tone_sequence + 0.2 * l_word - 0.4) / 6   # complexity calculation
+        history_seen = int(row['encounter_count'])
+        history_right = int(row['correct_count'])
+        history_wrong = history_seen - history_right
+        audio = int(row['audio_count'])
+        tone_score = pclip(float(row['tone_score']))
         # feature vector is a list of (feature, value) tuples
         fv = []
         # core features based on method
         if method == 'leitner':
-            fv.append((intern('diff'), right-wrong))
+            fv.append((sys.intern('diff'), history_right - history_wrong))
         elif method == 'pimsleur':
-            fv.append((intern('total'), right+wrong))
+            fv.append((sys.intern('total'), history_seen))
         else:
-            # fv.append((intern('right'), right))
-            # fv.append((intern('wrong'), wrong))
-            fv.append((intern('right'), math.sqrt(1+right)))
-            fv.append((intern('wrong'), math.sqrt(1+wrong)))
+            fv.append((sys.intern('right'), math.sqrt(1 + history_right)))
+            fv.append((sys.intern('wrong'), math.sqrt(1 + history_wrong)))
         # optional flag features
         if method == 'lr':
-            fv.append((intern('time'), t))
+            fv.append((sys.intern('time'), t))
         if not omit_bias:
-            fv.append((intern('bias'), 1.))
-        if not omit_lexemes:
-            fv.append((intern('%s:%s' % (row['learning_language'], lexeme_string)), 1.))
-        instances.append(Instance(p, t, fv, h, (right+2.)/(seen+4.), lang, right_this, wrong_this, timestamp, user_id, lexeme_string))
+            fv.append((sys.intern('bias'), 1.))
+        # if not omit_complexity:
+        fv.append((sys.intern('cmplx'), complexity))
+        fv.append((sys.intern('hseen'), history_seen))
+        fv.append((sys.intern('audio'), math.sqrt(float(1 + audio))))
+        fv.append((sys.intern('ltone'), l_tone_sequence))
+        fv.append((sys.intern('ptone'), tone_score))
+        instances.append(Instance(p, t, fv, h, user_id, word_id))
         if i % 1000000 == 0:
             sys.stderr.write('%d...' % i)
     sys.stderr.write('done!\n')
@@ -292,7 +285,7 @@ if __name__ == "__main__":
 
     # write out model weights and predictions
     filebits = [args.method] + \
-        [k for k, v in sorted(vars(args).iteritems()) if v is True] + \
+        [k for k, v in sorted(vars(args).items()) if v is True] + \
         [os.path.splitext(os.path.basename(args.input_file).replace('.gz', ''))[0]]
     if args.max_lines is not None:
         filebits.append(str(args.max_lines))
@@ -301,4 +294,3 @@ if __name__ == "__main__":
         os.makedirs('results/')
     model.dump_weights('results/'+filebase+'.weights')
     model.dump_predictions('results/'+filebase+'.preds', testset)
-    # model.dump_detailed_predictions('results/'+filebase+'.detailed', testset)
