@@ -23,7 +23,7 @@ LN2 = math.log(2.)
 
 
 # data instance object
-Instance = namedtuple('Instance', 'p t fv h uid wid'.split())
+Instance = namedtuple('Instance', 'p t complexity fv h uid wid'.split())
 
 
 class SpacedRepetitionModel(object):
@@ -34,7 +34,7 @@ class SpacedRepetitionModel(object):
       - 'leitner' (fixed)
       - 'pimsleur' (fixed)
     """
-    def __init__(self, method='hlr', omit_h_term=False, initial_weights=None, lrate=.001, hlwt=.01, l2wt=.1, sigma=1.):
+    def __init__(self, method='chlr', omit_h_term=False, initial_weights=None, lrate=.001, hlwt=.01, l2wt=.1, sigma=1.):
         self.method = method
         self.omit_h_term = omit_h_term
         self.weights = defaultdict(float)
@@ -54,7 +54,11 @@ class SpacedRepetitionModel(object):
             return MAX_HALF_LIFE
 
     def predict(self, inst, base=2.):
-        if self.method == 'hlr':
+        if self.method == 'chlr':
+            h = self.halflife(inst, base)
+            p = 2. ** (-inst.t*inst.complexity/h)
+            return pclip(p), h
+        elif self.method == 'hlr':
             h = self.halflife(inst, base)
             p = 2. ** (-inst.t/h)
             return pclip(p), h
@@ -80,7 +84,7 @@ class SpacedRepetitionModel(object):
             raise Exception
 
     def train_update(self, inst):
-        if self.method == 'hlr':
+        if self.method == 'hlr' or self.method == 'chlr':
             base = 2.
             p, h = self.predict(inst, base)
             dlp_dw = 2.*(p-inst.p)*(LN2**2)*p*(inst.t/h)
@@ -137,17 +141,17 @@ class SpacedRepetitionModel(object):
             results['slh'].append(slh)
         mae_p = mae(results['p'], results['pp'])
         mae_h = mae(results['h'], results['hh'])
-        cor_p = spearmanr(results['p'], results['pp'])
-        cor_h = spearmanr(results['h'], results['hh'])
+        # cor_p = spearmanr(results['p'], results['pp'])
+        # cor_h = spearmanr(results['h'], results['hh'])
         total_slp = sum(results['slp'])
         total_slh = sum(results['slh'])
         total_l2 = sum([x**2 for x in self.weights.values()])
         total_loss = total_slp + self.hlwt*total_slh + self.l2wt*total_l2
         if prefix:
             sys.stderr.write('%s\t' % prefix)
-        sys.stderr.write('%.1f (p=%.1f, h=%.1f, l2=%.1f)\tmae(p)=%.3f\tcor(p)=%.3f\tmae(h)=%.3f\tcor(h)=%.3f\n' % \
+        sys.stderr.write('%.1f (p=%.1f, h=%.1f, l2=%.1f)\tmae(p)=%.3f\tmae(h)=%.3f\n' % \
             (total_loss, total_slp, self.hlwt*total_slh, self.l2wt*total_l2, \
-            mae_p, cor_p, mae_h, cor_h))
+            mae_p, mae_h))
 
     def dump_weights(self, fname):
         with open(fname, 'w') as f:
@@ -197,7 +201,7 @@ def spearmanr(l1, l2):
     return num/math.sqrt(d1*d2)
 
 
-def read_data(input_file, method, omit_bias=False, omit_lexemes=False, max_lines=None):
+def read_data(input_file, method, omit_bias=False, omit_tonal_features=False, max_lines=None):
     # read learning trace data in specified format, see README for details
     sys.stderr.write('reading data...')
     instances = list()
@@ -217,6 +221,7 @@ def read_data(input_file, method, omit_bias=False, omit_lexemes=False, max_lines
         l_word = int(row['word_length'])
         l_tone_sequence = int(row['tone_sequence_length'])
         complexity = (0.8 * l_tone_sequence + 0.2 * l_word - 0.4) / 6   # complexity calculation
+        
         history_seen = int(row['encounter_count'])
         history_right = int(row['correct_count'])
         history_wrong = history_seen - history_right
@@ -237,13 +242,11 @@ def read_data(input_file, method, omit_bias=False, omit_lexemes=False, max_lines
             fv.append((sys.intern('time'), t))
         if not omit_bias:
             fv.append((sys.intern('bias'), 1.))
-        # if not omit_complexity:
-        fv.append((sys.intern('cmplx'), complexity))
-        fv.append((sys.intern('hseen'), history_seen))
-        fv.append((sys.intern('audio'), math.sqrt(float(1 + audio))))
-        fv.append((sys.intern('ltone'), l_tone_sequence))
-        fv.append((sys.intern('ptone'), tone_score))
-        instances.append(Instance(p, t, fv, h, user_id, word_id))
+        if not omit_tonal_features:
+            fv.append((sys.intern('audio'), math.sqrt(float(1 + audio))))
+            fv.append((sys.intern('ltone'), l_tone_sequence))
+            fv.append((sys.intern('ptone'), tone_score))
+        instances.append(Instance(p, t, complexity, fv, h, user_id, word_id))
         if i % 1000000 == 0:
             sys.stderr.write('%d...' % i)
     sys.stderr.write('done!\n')
@@ -255,7 +258,9 @@ argparser = argparse.ArgumentParser(description='Fit a SpacedRepetitionModel to 
 argparser.add_argument('-b', action="store_true", default=False, help='omit bias feature')
 argparser.add_argument('-l', action="store_true", default=False, help='omit lexeme features')
 argparser.add_argument('-t', action="store_true", default=False, help='omit half-life term')
-argparser.add_argument('-m', action="store", dest="method", default='hlr', help="hlr, lr, leitner, pimsleur")
+argparser.add_argument('-c', action="store_true", default=False, help='omit complexity feature')
+argparser.add_argument('-n', action="store_true", default=False, help='omit tonal features')
+argparser.add_argument('-m', action="store", dest="method", default='chlr', help="tonecom, chlr, hlr, lr, leitner, pimsleur")
 argparser.add_argument('-x', action="store", dest="max_lines", type=int, default=None, help="maximum number of lines to read (for dev)")
 argparser.add_argument('input_file', action="store", help='log file for training')
 
@@ -268,13 +273,15 @@ if __name__ == "__main__":
     sys.stderr.write('method = "%s"\n' % args.method)
     if args.b:
         sys.stderr.write('--> omit_bias\n')
-    if args.l:
-        sys.stderr.write('--> omit_lexemes\n')
     if args.t:
         sys.stderr.write('--> omit_h_term\n')
+    if args.c:
+        sys.stderr.write('--> omit_complexity_feature\n')
+    if args.n:
+        sys.stderr.write('--> omit_tonal_features\n')
 
     # read data set
-    trainset, testset = read_data(args.input_file, args.method, args.b, args.l, args.max_lines)
+    trainset, testset = read_data(args.input_file, args.method, args.b, args.n, args.max_lines)
     sys.stderr.write('|train| = %d\n' % len(trainset))
     sys.stderr.write('|test|  = %d\n' % len(testset))
 
